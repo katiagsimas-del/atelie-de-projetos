@@ -9938,6 +9938,436 @@ ${dados.textoLongoFase4 || 'Nenhuma anotação'}
         console.log('  - restaurarBackup(data)');
         console.log('  - resetarSistemaCompleto()');
         console.log('🔗 Integrado com Quartel General via PostMessage');
+
+        // ==================== SINCRONIZAÇÃO COM SUPABASE (NUVEM) ====================
+        
+        // Configuração do Supabase
+        const SUPABASE_CONFIG = {
+            url: null,
+            key: null,
+            initialized: false
+        };
+
+        let supabaseClient = null;
+        let currentUserId = null;
+        let syncInProgress = false;
+
+        // Carregar biblioteca Supabase
+        (function() {
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
+            script.onload = () => console.log('✅ Biblioteca Supabase carregada');
+            script.onerror = () => console.warn('⚠️ Erro ao carregar Supabase - funcionando offline');
+            document.head.appendChild(script);
+        })();
+
+        // Inicializar Supabase
+        function initSupabase(url, key, userId) {
+            try {
+                if (!url || !key) {
+                    console.warn('⚠️ Supabase não configurado - funcionando offline');
+                    return false;
+                }
+                
+                SUPABASE_CONFIG.url = url;
+                SUPABASE_CONFIG.key = key;
+                SUPABASE_CONFIG.initialized = true;
+                currentUserId = userId;
+                
+                if (!window.supabase) {
+                    console.warn('⚠️ Biblioteca Supabase não carregada ainda - aguardando...');
+                    setTimeout(() => initSupabase(url, key, userId), 1000);
+                    return false;
+                }
+                
+                supabaseClient = window.supabase.createClient(url, key);
+                
+                console.log('✅ Supabase inicializado! Sincronização automática ativa.');
+                
+                // Sincronizar dados existentes após 2 segundos
+                setTimeout(() => syncAllData(), 2000);
+                
+                // Sincronização periódica (a cada 5 minutos)
+                setInterval(() => syncAllData(), 5 * 60 * 1000);
+                
+                return true;
+                
+            } catch (error) {
+                console.error('❌ Erro ao inicializar Supabase:', error);
+                return false;
+            }
+        }
+
+        // Sincronizar todos os dados
+        async function syncAllData() {
+            if (!SUPABASE_CONFIG.initialized || syncInProgress || !navigator.onLine) return;
+            
+            syncInProgress = true;
+            console.log('🔄 Sincronizando com nuvem...');
+            
+            try {
+                await pullFromCloud();
+                await pushToCloud();
+                
+                console.log('✅ Sincronização completa!');
+                
+                window.parent.postMessage({
+                    type: 'SYNC_COMPLETED',
+                    timestamp: new Date().toISOString()
+                }, '*');
+                
+            } catch (error) {
+                console.error('❌ Erro na sincronização:', error);
+                
+                window.parent.postMessage({
+                    type: 'SYNC_ERROR',
+                    error: error.message
+                }, '*');
+                
+            } finally {
+                syncInProgress = false;
+            }
+        }
+
+        // Puxar dados da nuvem
+        async function pullFromCloud() {
+            if (!supabaseClient || !currentUserId) return;
+            
+            try {
+                const { data: produtos, error } = await supabaseClient
+                    .from('infoprodutos')
+                    .select(`
+                        *,
+                        infoproduto_links (*),
+                        infoproduto_arquivos (*),
+                        infoproduto_galeria (*)
+                    `)
+                    .eq('user_id', currentUserId)
+                    .order('updated_at', { ascending: false });
+                
+                if (error) throw error;
+                
+                if (!produtos || produtos.length === 0) {
+                    console.log('ℹ️ Nenhum produto na nuvem');
+                    return;
+                }
+                
+                console.log(`📥 ${produtos.length} produto(s) da nuvem`);
+                
+                produtos.forEach(produto => {
+                    const produtoLocal = {
+                        id: produto.local_id || produto.id,
+                        tipo: produto.tipo,
+                        nome: produto.nome,
+                        status: produto.status,
+                        
+                        problemaResolver: produto.problema_resolver,
+                        habilidades: produto.habilidades,
+                        ikigai: produto.ikigai,
+                        cronograma: produto.cronograma,
+                        
+                        descricao: produto.descricao,
+                        publicoAlvo: produto.publico_alvo,
+                        preco: produto.preco,
+                        plataforma: produto.plataforma,
+                        observacoes: produto.observacoes,
+                        
+                        thumbnail: produto.thumbnail,
+                        progresso: produto.progresso,
+                        links: produto.infoproduto_links?.map(l => ({
+                            categoria: l.categoria,
+                            titulo: l.titulo,
+                            url: l.url
+                        })) || [],
+                        
+                        arquivos: produto.infoproduto_arquivos?.map(a => ({
+                            name: a.name,
+                            size: a.size,
+                            type: a.type,
+                            data: a.data,
+                            icon: a.icon
+                        })) || [],
+                        checklistState: produto.checklist_state || [],
+                        
+                        galeria: produto.infoproduto_galeria?.map(g => ({
+                            data: g.data,
+                            name: g.name
+                        })) || [],
+                        
+                        dataCriacao: produto.data_criacao,
+                        textoLongoFase1: produto.texto_longo_fase1,
+                        textoLongoFase2: produto.texto_longo_fase2,
+                        textoLongoFase3: produto.texto_longo_fase3,
+                        textoLongoFase4: produto.texto_longo_fase4,
+                        
+                        _cloudId: produto.id,
+                        _lastSynced: produto.last_synced_at
+                    };
+                    
+                    const localProduto = StorageManager.getProdutoById(produtoLocal.id);
+                    
+                    if (!localProduto) {
+                        StorageManager.addProduto(produtoLocal);
+                        console.log(`✅ "${produtoLocal.nome}" adicionado`);
+                    } else {
+                        const cloudDate = new Date(produto.updated_at);
+                        const localDate = new Date(localProduto.updated_at || localProduto.dataCriacao);
+                        
+                        if (cloudDate > localDate) {
+                            StorageManager.updateProduto(produtoLocal.id, produtoLocal);
+                            console.log(`🔄 "${produtoLocal.nome}" atualizado`);
+                        }
+                    }
+                });
+                
+                carregarProdutos();
+                if (typeof atualizarDashboard === 'function') atualizarDashboard();
+                
+            } catch (error) {
+                console.error('❌ Erro ao puxar da nuvem:', error);
+                throw error;
+            }
+        }
+
+        // Empurrar dados locais para nuvem
+        async function pushToCloud() {
+            if (!supabaseClient || !currentUserId) return;
+            
+            try {
+                const produtos = StorageManager.getProdutos();
+                
+                if (produtos.length === 0) {
+                    console.log('ℹ️ Nenhum produto local para sincronizar');
+                    return;
+                }
+                
+                console.log(`📤 Sincronizando ${produtos.length} produto(s)...`);
+                
+                for (const produto of produtos) {
+                    await pushProdutoToCloud(produto);
+                }
+                
+            } catch (error) {
+                console.error('❌ Erro ao empurrar para nuvem:', error);
+                throw error;
+            }
+        }
+
+        // Empurrar produto específico
+        async function pushProdutoToCloud(produto) {
+            if (!supabaseClient || !currentUserId) return;
+            
+            try {
+                const { data: existing } = await supabaseClient
+                    .from('infoprodutos')
+                    .select('id, updated_at')
+                    .eq('user_id', currentUserId)
+                    .eq('local_id', produto.id)
+                    .maybeSingle();
+                
+                const produtoData = {
+                    user_id: currentUserId,
+                    local_id: produto.id,
+                    tipo: produto.tipo,
+                    nome: produto.nome,
+                    status: produto.status,
+                    problema_resolver: produto.problemaResolver,
+                    habilidades: produto.habilidades,
+                    ikigai: produto.ikigai,
+                    cronograma: produto.cronograma,
+                    descricao: produto.descricao,
+                    publico_alvo: produto.publicoAlvo,
+                    preco: produto.preco,
+                    plataforma: produto.plataforma,
+                    observacoes: produto.observacoes,
+                    thumbnail: produto.thumbnail,
+                    progresso: produto.progresso,
+                    checklist_state: produto.checklistState || [],
+                    data_criacao: produto.dataCriacao,
+                    texto_longo_fase1: produto.textoLongoFase1,
+                    texto_longo_fase2: produto.textoLongoFase2,
+                    texto_longo_fase3: produto.textoLongoFase3,
+                    texto_longo_fase4: produto.textoLongoFase4,
+                    last_synced_at: new Date().toISOString()
+                };
+                
+                let cloudId;
+                
+                if (existing) {
+                    const { data, error } = await supabaseClient
+                        .from('infoprodutos')
+                        .update(produtoData)
+                        .eq('id', existing.id)
+                        .select()
+                        .single();
+                    
+                    if (error) throw error;
+                    cloudId = data.id;
+                } else {
+                    const { data, error } = await supabaseClient
+                        .from('infoprodutos')
+                        .insert(produtoData)
+                        .select()
+                        .single();
+                    
+                    if (error) throw error;
+                    cloudId = data.id;
+                }
+                
+                if (produto.links && produto.links.length > 0) {
+                    await syncLinks(cloudId, produto.links);
+                }
+                
+                if (produto.arquivos && produto.arquivos.length > 0) {
+                    await syncArquivos(cloudId, produto.arquivos);
+                }
+                
+                if (produto.galeria && produto.galeria.length > 0) {
+                    await syncGaleria(cloudId, produto.galeria);
+                }
+                
+            } catch (error) {
+                console.error(`❌ Erro ao sincronizar "${produto.nome}":`, error);
+            }
+        }
+
+        // Sincronizar links
+        async function syncLinks(infoprodutoId, links) {
+            if (!supabaseClient || !currentUserId) return;
+            
+            try {
+                await supabaseClient
+                    .from('infoproduto_links')
+                    .delete()
+                    .eq('infoproduto_id', infoprodutoId);
+                
+                if (links.length > 0) {
+                    const linksData = links.map((link, index) => ({
+                        infoproduto_id: infoprodutoId,
+                        user_id: currentUserId,
+                        categoria: link.categoria,
+                        titulo: link.titulo,
+                        url: link.url,
+                        ordem: index
+                    }));
+                    
+                    await supabaseClient
+                        .from('infoproduto_links')
+                        .insert(linksData);
+                }
+            } catch (error) {
+                console.error('❌ Erro ao sincronizar links:', error);
+            }
+        }
+
+        // Sincronizar arquivos
+        async function syncArquivos(infoprodutoId, arquivos) {
+            if (!supabaseClient || !currentUserId) return;
+            
+            try {
+                await supabaseClient
+                    .from('infoproduto_arquivos')
+                    .delete()
+                    .eq('infoproduto_id', infoprodutoId);
+                
+                if (arquivos.length > 0) {
+                    const arquivosData = arquivos.map((arquivo, index) => ({
+                        infoproduto_id: infoprodutoId,
+                        user_id: currentUserId,
+                        name: arquivo.name,
+                        size: arquivo.size,
+                        type: arquivo.type,
+                        data: arquivo.data,
+                        icon: arquivo.icon,
+                        ordem: index
+                    }));
+                    
+                    await supabaseClient
+                        .from('infoproduto_arquivos')
+                        .insert(arquivosData);
+                }
+            } catch (error) {
+                console.error('❌ Erro ao sincronizar arquivos:', error);
+            }
+        }
+
+        // Sincronizar galeria
+        async function syncGaleria(infoprodutoId, galeria) {
+            if (!supabaseClient || !currentUserId) return;
+            
+            try {
+                await supabaseClient
+                    .from('infoproduto_galeria')
+                    .delete()
+                    .eq('infoproduto_id', infoprodutoId);
+                
+                if (galeria.length > 0) {
+                    const galeriaData = galeria.map((imagem, index) => ({
+                        infoproduto_id: infoprodutoId,
+                        user_id: currentUserId,
+                        data: imagem.data,
+                        name: imagem.name,
+                        ordem: index
+                    }));
+                    
+                    await supabaseClient
+                        .from('infoproduto_galeria')
+                        .insert(galeriaData);
+                }
+            } catch (error) {
+                console.error('❌ Erro ao sincronizar galeria:', error);
+            }
+        }
+
+        // Adicionar listener para comandos de sincronização
+        window.addEventListener('message', function(event) {
+            const message = event.data;
+            
+            switch(message.type) {
+                case 'INIT_SUPABASE':
+                    initSupabase(message.url, message.key, message.userId);
+                    break;
+                    
+                case 'SYNC_NOW':
+                    syncAllData();
+                    break;
+                    
+                case 'PUSH_PRODUTO':
+                    if (message.produto) {
+                        pushProdutoToCloud(message.produto);
+                    }
+                    break;
+            }
+        });
+
+        // Hook StorageManager para sincronizar automaticamente
+        const _originalAddProduto = StorageManager.addProduto;
+        StorageManager.addProduto = function(produto) {
+            const result = _originalAddProduto.call(this, produto);
+            
+            if (SUPABASE_CONFIG.initialized && navigator.onLine) {
+                setTimeout(() => pushProdutoToCloud(produto), 1000);
+            }
+            
+            return result;
+        };
+
+        const _originalUpdateProduto = StorageManager.updateProduto;
+        StorageManager.updateProduto = function(id, updates) {
+            const result = _originalUpdateProduto.call(this, id, updates);
+            
+            if (SUPABASE_CONFIG.initialized && navigator.onLine) {
+                const produto = StorageManager.getProdutoById(id);
+                if (produto) {
+                    setTimeout(() => pushProdutoToCloud(produto), 1000);
+                }
+            }
+            
+            return result;
+        };
+
+        console.log('✅ Sistema de Sincronização Supabase carregado!');
+        console.log('☁️ Aguardando inicialização do Quartel General...');
     </script>
 </body>
 </html>
