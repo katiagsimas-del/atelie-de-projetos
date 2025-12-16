@@ -9705,6 +9705,239 @@ ${dados.textoLongoFase4 || 'Nenhuma anotação'}
             atualizarDashboard();
             renderizarConversasSalvas();
         });
+
+        // ==================== SISTEMA DE BACKUP COMPLETO ====================
+        // Integração com Quartel General para gestão centralizada de backups
+        
+        // Escutar mensagens do parent (Quartel General)
+        window.addEventListener('message', function(event) {
+            const message = event.data;
+            
+            switch(message.type) {
+                case 'CREATE_GLOBAL_BACKUP':
+                    criarBackupGlobal();
+                    break;
+                    
+                case 'RESTORE_BACKUP':
+                    restaurarBackup(message.data);
+                    break;
+                    
+                case 'RESET_SYSTEM':
+                    resetarSistemaCompleto();
+                    break;
+                    
+                case 'OPEN_INDIVIDUAL_BACKUP':
+                    alert('Por favor, abra um produto e clique em "Exportar JSON" para fazer backup individual.');
+                    break;
+            }
+        });
+
+        // Criar Backup Global
+        function criarBackupGlobal() {
+            try {
+                const produtos = StorageManager.getProdutos();
+                
+                if (produtos.length === 0) {
+                    alert('⚠️ Nenhum produto para fazer backup!');
+                    return;
+                }
+                
+                const backup = {
+                    version: "MAPA-V1",
+                    exportDate: new Date().toISOString(),
+                    userAgent: navigator.userAgent,
+                    totalProdutos: produtos.length,
+                    dataSize: 0,
+                    data: {
+                        produtos: produtos,
+                        thumbnails: thumbnailsData || {},
+                        files: filesData || {},
+                        galeria: galeriaData || {},
+                        links: linksData || {}
+                    }
+                };
+                
+                const json = JSON.stringify(backup, null, 2);
+                backup.dataSize = json.length;
+                
+                const sizeKB = (json.length / 1024).toFixed(2);
+                const sizeMB = (json.length / 1024 / 1024).toFixed(2);
+                const sizeFormatted = json.length > 1024 * 1024 ? `${sizeMB} MB` : `${sizeKB} KB`;
+                
+                // Notificar parent (Quartel General)
+                window.parent.postMessage({
+                    type: 'BACKUP_CREATED',
+                    backupType: 'global',
+                    size: sizeFormatted,
+                    products: produtos.length,
+                    data: backup
+                }, '*');
+                
+                // Download automático
+                const blob = new Blob([json], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `backup-global-${new Date().toISOString().split('T')[0]}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+                
+                alert(`✅ Backup Global criado com sucesso!\n\n📊 ${produtos.length} produto(s)\n💾 ${sizeFormatted}\n📥 Arquivo baixado automaticamente`);
+                
+            } catch (error) {
+                console.error('Erro ao criar backup global:', error);
+                alert('❌ Erro ao criar backup. Verifique o console.');
+            }
+        }
+
+        // Restaurar Backup
+        function restaurarBackup(backupData) {
+            try {
+                if (!backupData || !backupData.data) {
+                    throw new Error('Backup inválido: estrutura incorreta');
+                }
+                
+                if (backupData.data.produtos) {
+                    restaurarBackupGlobal(backupData);
+                } else if (backupData.id && backupData.tipo) {
+                    restaurarBackupIndividual(backupData);
+                } else {
+                    throw new Error('Tipo de backup não reconhecido');
+                }
+                
+            } catch (error) {
+                console.error('Erro ao restaurar backup:', error);
+                alert(`❌ Erro ao restaurar backup:\n\n${error.message}`);
+            }
+        }
+
+        // Restaurar Backup Global
+        function restaurarBackupGlobal(backup) {
+            try {
+                const data = backup.data;
+                
+                // Limpar dados atuais
+                localStorage.removeItem('produtos');
+                
+                // Restaurar produtos
+                if (data.produtos && data.produtos.length > 0) {
+                    data.produtos.forEach(produto => {
+                        StorageManager.addProduto(produto);
+                    });
+                }
+                
+                // Restaurar dados globais
+                if (data.thumbnails) {
+                    thumbnailsData = data.thumbnails;
+                    localStorage.setItem('thumbnailsData', JSON.stringify(thumbnailsData));
+                }
+                if (data.files) {
+                    filesData = data.files;
+                    localStorage.setItem('filesData', JSON.stringify(filesData));
+                }
+                if (data.galeria) {
+                    galeriaData = data.galeria;
+                    localStorage.setItem('galeriaData', JSON.stringify(galeriaData));
+                }
+                if (data.links) {
+                    linksData = data.links;
+                    localStorage.setItem('linksData', JSON.stringify(linksData));
+                }
+                
+                // Recarregar interface
+                carregarProdutos();
+                if (typeof atualizarDashboard === 'function') atualizarDashboard();
+                
+                alert(`✅ Backup Global restaurado com sucesso!\n\n📊 ${data.produtos.length} produto(s) restaurado(s)`);
+                
+            } catch (error) {
+                console.error('Erro ao restaurar backup global:', error);
+                alert(`❌ Erro ao restaurar:\n\n${error.message}`);
+            }
+        }
+
+        // Restaurar Backup Individual
+        function restaurarBackupIndividual(produto) {
+            try {
+                const produtos = StorageManager.getProdutos();
+                const existe = produtos.find(p => p.id === produto.id);
+                
+                if (existe) {
+                    if (!confirm(`⚠️ Já existe um produto com este ID.\n\nDeseja sobrescrever?`)) {
+                        return;
+                    }
+                    StorageManager.deleteProduto(produto.id);
+                }
+                
+                StorageManager.addProduto(produto);
+                
+                // Recarregar interface
+                carregarProdutos();
+                if (typeof atualizarDashboard === 'function') atualizarDashboard();
+                
+                alert(`✅ Produto restaurado com sucesso!\n\n📦 ${produto.nome}`);
+                
+            } catch (error) {
+                console.error('Erro ao restaurar backup individual:', error);
+                alert(`❌ Erro ao restaurar:\n\n${error.message}`);
+            }
+        }
+
+        // Resetar Sistema Completo
+        function resetarSistemaCompleto() {
+            try {
+                // Limpar TUDO do localStorage
+                localStorage.clear();
+                
+                // Limpar variáveis globais
+                thumbnailsData = {};
+                filesData = {};
+                galeriaData = {};
+                linksData = {};
+                
+                // Recarregar página
+                location.reload();
+                
+            } catch (error) {
+                console.error('Erro ao resetar sistema:', error);
+                alert('❌ Erro ao resetar sistema. Tente novamente.');
+            }
+        }
+
+        // Modificar exportarJSON existente para notificar parent
+        // Guardar função original
+        if (typeof exportarJSON !== 'undefined') {
+            const exportarJSONOriginal = exportarJSON;
+            
+            // Sobrescrever com nova versão
+            exportarJSON = function() {
+                if (!produtoAtual) return;
+                
+                // Executar função original
+                exportarJSONOriginal();
+                
+                // Notificar parent sobre backup individual
+                const json = JSON.stringify(produtoAtual, null, 2);
+                const sizeKB = (json.length / 1024).toFixed(2);
+                
+                window.parent.postMessage({
+                    type: 'BACKUP_CREATED',
+                    backupType: 'individual',
+                    size: `${sizeKB} KB`,
+                    products: 1,
+                    productName: produtoAtual.nome,
+                    data: produtoAtual
+                }, '*');
+            };
+        }
+
+        // Log para confirmar carregamento
+        console.log('✅ Sistema de Backup Completo carregado!');
+        console.log('📦 Funções disponíveis:');
+        console.log('  - criarBackupGlobal()');
+        console.log('  - restaurarBackup(data)');
+        console.log('  - resetarSistemaCompleto()');
+        console.log('🔗 Integrado com Quartel General via PostMessage');
     </script>
 </body>
 </html>
